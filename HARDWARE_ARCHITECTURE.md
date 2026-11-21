@@ -9,8 +9,9 @@
 
 sdformat merges the fixed-joint parts into one rigid body. Its mass, centre of gravity and inertia come from the per-part values below:
 
-- **Total mass:** 1.623 kg.
-- **Centre of gravity:** (−0.9, 0, +0.7) mm from the frame centre.
+- **Total mass:** 1.674 kg, including the fibre-tether hardware.
+- **Centre of gravity:** (0, 0, +1.4) mm from the frame centre.
+- **Weight:** 16.43 N. **Buoyancy when fully submerged:** 14.67 N. **Net:** −1.76 N, slightly heavy.
 
 ## Parts list (as modelled)
 
@@ -28,8 +29,40 @@ sdformat merges the fixed-joint parts into one rigid body. Its mass, centre of g
 | Sealed enclosure | clear acrylic box (**design assumption**) | 140 × 100 × 70 mm | ~160 g | — | on the top plate |
 | Trim ballast | lead plate (**design assumption**) | 100 × 50 × 7 mm | ~400 g | — | under the battery |
 | Landing gear | skid type | 240 mm skids, 100 mm tall | ~60 g | typical | legs and skids |
+| Fibre media converter | Ethernet ⇄ fibre, mini/SFP class | 50 × 35 × 15 mm | ~30 g | typical | board in enclosure |
+| Companion computer | Raspberry Pi Zero 2 W (camera stream + MAVLink router) | 65 × 30 × 5 mm | ~11 g | Raspberry Pi | board in enclosure |
+| Tether exit | strain-relief sleeve, bottom centre (away from the props) | Ø12 × 60 mm | ~10 g | design | sleeve under the ballast |
+| Tether (shore side) | 2 mm Kevlar-reinforced G.657.A2 fibre, 25 m paid out from a reel | ~6 g/m, ~400 N breaking load | — | typical tactical fibre | tether model + yellow line in Gazebo/RViz |
 
-The vendor's propulsion figure is about 885 g of pull for an A2212 1000 KV with a 1045 prop at 11.1 V. The model is derated to **8.0 N per motor**, which gives a thrust-to-weight ratio of about 2.0.
+The vendor's propulsion figure is about 885 g of pull for an A2212 1000 KV with a 1045 prop at 11.1 V. The model is derated to **8.0 N per motor**, which gives a thrust-to-weight ratio of about 1.95.
+
+## Command link (why fibre)
+
+Water absorbs radio waves. Estimated from the dielectric properties of fresh water:
+
+| Link | Frequency | Loss in fresh water | Effect |
+| --- | --- | --- | --- |
+| RC control | 2.4 GHz | about 2.5 dB per cm | lost about 10 cm below the surface (30 dB margin, 4.4 dB interface loss) |
+| FPV video | 5.8 GHz | about 14 dB per cm | lost within about 2 cm |
+| GPS | 1.575 GHz | about 1 dB per cm | lost as soon as the antenna is submerged |
+
+Salt water is far worse. Signal coming up from below can also only leave the water within about 6° of vertical. The design therefore uses a **fibre-optic tether**: Ethernet over fibre carries H.264 video and MAVLink, and the normal radio is kept as a backup for long flights in the air. The simulation models both links, including the radio failsafe (it climbs until the antenna regains signal) and the tether's weight, drag and breaking load.
+
+## Propellers in water (RPM, prop strike, cavitation)
+
+The model uses T = C<sub>t</sub>·ρ·n²·D⁴ and Q = C<sub>q</sub>·ρ·n²·D⁵, with C<sub>t</sub> = 0.11, C<sub>q</sub> = 0.008 and D = 0.254 m (static 1045 values from textbooks). Motor current is Q/K<sub>t</sub> + 0.5 A, with K<sub>t</sub> = 60/(2π·1000 KV) = 0.0095 N·m/A.
+
+| Condition | RPM | Tip speed | Current per motor |
+| --- | --- | --- | --- |
+| Hover in air (~4.1 N per motor) | ~5,100 | ~68 m/s | ~6 A |
+| Full thrust in air (8 N) | ~7,200 | ~95 m/s | ~11 A |
+| Holding depth underwater (~0.45 N per motor) | ~60–90 | ~1 m/s | ~2–3 A |
+| Water thrust limit (3 N) | ~150 | ~2 m/s | ~6 A |
+
+- **Prop strike.** Hitting water at air RPM loads the blade tip with about ρv²/2 ≈ 2 MPa, enough to break plastic props or strip the adapter. The vehicle performs a splashdown: descent ≤ 0.4 m/s over the last 0.3 m, then the props spin down to about 1,000 RPM once the hull is wet, timed to finish about 80 ms before blade contact. The 1,500 RPM strike threshold is an **assumption**. In tests the props entered at 640–1,080 RPM with no strikes.
+- **ESC current.** Applying full voltage to a nearly stalled motor in water can draw 100 A or more. Water-mode thrust is therefore capped (3 N per rotor, about 6 A).
+- **ESC braking.** Spin-up is modelled with a 40 ms time constant. Spin-down uses 20 ms, assuming BLHeli_32 "damped light" active braking.
+- **Cavitation.** The cavitation number σ = (p<sub>atm</sub> + ρgh − p<sub>v</sub>)/(½ρV<sub>tip</sub>²) stays above 100 underwater (onset is below about 1), so there is none. Near the surface the real risk is **ventilation**: the prop sucks air down and loses thrust. That is not modelled yet.
 
 ### Geometry facts established from the CAD
 

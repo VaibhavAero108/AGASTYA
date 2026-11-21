@@ -11,17 +11,28 @@
 //      first-order motor lag and medium-dependent thrust limits,
 //   4. applies a single summed wrench to the base link (ExternalWorldWrenchCmd
 //      is cleared by the Physics system after each step, so nothing queues).
+//   5. estimates propeller RPM / motor current from momentum-theory
+//      coefficients, flags prop strikes at water entry and the cavitation
+//      number underwater, and guards splashdown (slow approach + prop spin-
+//      down before the blades touch the water),
+//   6. models the command link: 2.4/5.8 GHz radio (absorbed by water) or a
+//      fibre-optic tether (unaffected by water; adds tether weight/drag/
+//      tension), with a failsafe that surfaces the vehicle on link loss.
 //
-// Rotor, drag and water-thrust figures are configuration parameters taken
-// from nominal datasheet values or explicit assumptions; they are not
-// measurements of a built AGASTYA prototype.
+// Rotor, drag, water-thrust, propeller-coefficient and link figures are
+// configuration parameters taken from nominal datasheet values, textbook
+// physics or explicit assumptions; they are not measurements of a built
+// AGASTYA prototype.
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <iomanip>
+#include <limits>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -87,6 +98,11 @@ struct Rotor
   double thrust{0.0}; // current (lagged) thrust [N]
   double cmd{0.0};
   double waterFraction{0.0};
+  double propHeight{1e9};   // hub height above the water surface (in pool) [m]
+  double guardCap{1e9};     // splashdown thrust cap [N]
+  double rpm{0.0}, current{0.0};
+  double lastAirRpm{0.0}, entryRpm{0.0};
+  bool wet{false};
 };
 
 struct Cell
@@ -131,6 +147,7 @@ public:
     this->airTorqueCoeff = Num(sdf, "air_torque_coeff", 0.016);
     this->waterTorqueCoeff = Num(sdf, "water_torque_coeff", 0.03);
     this->motorTau = Num(sdf, "motor_time_constant", 0.04);
+    this->motorTauDown = Num(sdf, "motor_time_constant_down", 0.02);
     this->rotorBand = Num(sdf, "rotor_transition_band", 0.04);
     if (sdf->HasElement("rotor"))
     {
@@ -206,17 +223,51 @@ public:
     this->maxYawRate = Num(sdf, "max_yaw_rate", 1.5);
     this->cmdTimeout = Num(sdf, "command_timeout", 0.6);
 
+    // Propeller / motor model (RPM, current, prop strike, cavitation) --------
+    this->propD = Num(sdf, "prop_diameter", 0.254);
+    this->propCt = Num(sdf, "prop_ct", 0.11);
+    this->propCq = Num(sdf, "prop_cq", 0.008);
+    this->motorKv = Num(sdf, "motor_kv", 1000.0);
+    this->motorNoLoadCurrent = Num(sdf, "motor_no_load_current", 0.5);
+    this->propStrikeRpm = Num(sdf, "prop_strike_rpm", 1500.0);
+    this->entryRpm = Num(sdf, "entry_rpm", 1000.0);
+    this->entryGuardHeight = Num(sdf, "entry_guard_height", 0.15);
+    this->entryGuardFloor = Num(sdf, "entry_guard_floor", 0.05);
+    this->hullBottomZ = Num(sdf, "hull_bottom_z", -0.106);
+    this->splashdownSpeed = Num(sdf, "splashdown_speed", 0.4);
+    this->deckZ = Num(sdf, "deck_z", 0.10);
+
+    // Command link: radio vs fibre tether ------------------------------------
+    this->linkMode = sdf->Get<std::string>("link_mode", "fibre").first;
+    if (this->linkMode != "radio") this->linkMode = "fibre";
+    this->radioAntenna = Vec(sdf, "radio_antenna", Vector3d(-0.035, 0, 0.15));
+    this->rcLinkMargin = Num(sdf, "rc_link_margin_db", 30.0);
+    this->rcLossPerCm = Num(sdf, "rc_loss_db_per_cm", 2.5);
+    this->videoLinkMargin = Num(sdf, "video_link_margin_db", 30.0);
+    this->videoLossPerCm = Num(sdf, "video_loss_db_per_cm", 14.0);
+    this->interfaceLoss = Num(sdf, "air_water_interface_loss_db", 4.4);
+    this->tetherAnchor = Vec(sdf, "tether_anchor", Vector3d(6.6, 1.6, 0.12));
+    this->tetherExit = Vec(sdf, "tether_exit", Vector3d(0, 0, -0.11));
+    this->tetherLength = Num(sdf, "tether_length", 25.0);
+    this->tetherLambda = Num(sdf, "tether_linear_density", 0.006);
+    this->tetherDiameter = Num(sdf, "tether_diameter", 0.002);
+    this->tetherBreakingLoad = Num(sdf, "tether_breaking_load", 400.0);
+    this->tetherStiffness = Num(sdf, "tether_stiffness", 3000.0);
+    this->failsafeAscent = Num(sdf, "failsafe_ascent_speed", 0.25);
+    this->activeMode = "auto";
+
     // Topics -----------------------------------------------------------------
     const std::string ns = sdf->Get<std::string>("namespace", "/agastya").first;
     this->node.Subscribe(ns + "/cmd_vel", &AgastyaDynamics::OnTwist, this);
     this->node.Subscribe(ns + "/mode", &AgastyaDynamics::OnMode, this);
     this->node.Subscribe(ns + "/depth/setpoint", &AgastyaDynamics::OnDepth, this);
+    this->node.Subscribe(ns + "/link_mode", &AgastyaDynamics::OnLinkMode, this);
     this->statusPub = this->node.Advertise<gz::msgs::StringMsg>(ns + "/status");
 
     this->configured = true;
     gzmsg << "[AgastyaDynamics] configured: " << this->rotors.size() << " rotors, "
           << this->cells.size() << " buoyancy cells, displaced volume "
-          << this->totalVolume * 1000.0 << " L\n";
+          << this->totalVolume * 1000.0 << " L, link mode " << this->linkMode << "\n";
   }
 
   void PreUpdate(const gz::sim::UpdateInfo &_info,
@@ -320,15 +371,107 @@ public:
     }
 
     // --- rotor medium ------------------------------------------------------
-    double airAuthority = 0.0;
     for (auto &r : this->rotors)
     {
       const Vector3d rw = pose.Pos() + q.RotateVector(r.position);
-      const double depth = this->InPool(rw) ? this->surfaceZ - rw.Z() : -1.0;
+      const bool inPool = this->InPool(rw);
+      const double depth = inPool ? this->surfaceZ - rw.Z() : -1.0;
+      r.propHeight = inPool ? rw.Z() - this->surfaceZ : 1e9;
       r.waterFraction = SmoothStep((depth + 0.5 * this->rotorBand) / this->rotorBand);
-      airAuthority += 1.0 - r.waterFraction;
     }
-    (void)airAuthority;
+
+    // --- command link + fibre tether -------------------------------------------
+    std::string linkMode;
+    {
+      std::lock_guard<std::mutex> lock(this->mutex);
+      linkMode = this->linkMode;
+      if (this->tetherResetPending) { this->tetherBroken = false; this->tetherResetPending = false; }
+    }
+    const bool fibre = (linkMode == "fibre");
+    const Vector3d antennaW = pose.Pos() + q.RotateVector(this->radioAntenna);
+    const double antennaDepth = this->InPool(antennaW) ? this->surfaceZ - antennaW.Z() : -1.0;
+    double rcMargin = this->rcLinkMargin, videoQuality = 1.0;
+    if (antennaDepth > 0.0)
+    {
+      // RF absorption in water: dB per cm of water above the antenna, plus
+      // the air/water interface reflection loss.
+      rcMargin = this->rcLinkMargin - this->interfaceLoss - this->rcLossPerCm * antennaDepth * 100.0;
+      const double vidMargin =
+          this->videoLinkMargin - this->interfaceLoss - this->videoLossPerCm * antennaDepth * 100.0;
+      videoQuality = Clamp(vidMargin / 10.0, 0.0, 1.0);
+    }
+    else if (antennaDepth > -0.03)
+    {
+      videoQuality = Clamp(0.6 + 0.4 * (-antennaDepth / 0.03), 0.0, 1.0);  // spray / wave shadowing
+    }
+    double tetherDist = 0.0, tetherTension = 0.0;
+    std::vector<Vector3d> tetherPts;
+    if (fibre && !this->tetherBroken)
+    {
+      const Vector3d exitW = pose.Pos() + q.RotateVector(this->tetherExit);
+      const Vector3d toAnchor = this->tetherAnchor - exitW;
+      tetherDist = toAnchor.Length();
+      const Vector3d dir = tetherDist > 1e-6 ? toAnchor / tetherDist : Vector3d::Zero;
+      Vector3d ft;
+      if (tetherDist > this->tetherLength)  // paid-out length used up: tether goes taut
+      {
+        const Vector3d vExit = v + wWorld.Cross(exitW - p);
+        const double awayRate = -vExit.Dot(dir);
+        tetherTension = std::max(0.0, this->tetherStiffness * (tetherDist - this->tetherLength) + 50.0 * awayRate);
+        ft += dir * tetherTension;
+        if (tetherTension > this->tetherBreakingLoad)
+        {
+          this->tetherBroken = true;
+          gzwarn << "[AgastyaDynamics] fibre tether BROKEN at " << tetherTension << " N\n";
+        }
+      }
+      const bool exitInWater = this->InPool(exitW) && exitW.Z() < this->surfaceZ;
+      if (exitInWater)
+      {
+        const double depthExit = this->surfaceZ - exitW.Z();
+        const double area = GZ_PI * this->tetherDiameter * this->tetherDiameter / 4.0;
+        const double wetLambda = this->tetherLambda - this->rhoWater * area;  // weight in water per metre
+        const double subLen = 1.5 * depthExit;
+        ft += Vector3d(0, 0, -wetLambda * this->gravity * subLen);
+        const double speed = v.Length();
+        if (speed > 1e-4)
+        {
+          double fd = 0.5 * this->rhoWater * 1.2 * this->tetherDiameter * subLen * speed * speed;
+          fd = std::min(fd, 0.8 * mass * speed / dt);
+          ft += v * (-fd / speed);
+        }
+      }
+      else
+      {
+        // the hanging span below the vehicle is carried by it; a helper on
+        // shore keeps the rest slack
+        const double support = this->InPool(exitW) ? this->surfaceZ : this->deckZ;
+        ft += Vector3d(0, 0, -this->tetherLambda * this->gravity * std::max(0.0, exitW.Z() - support));
+      }
+      forceEnv += ft;
+      torqueEnv += (exitW - p).Cross(ft);
+
+      // polyline for visualisation: anchor -> vehicle with a little sag
+      const int n = 14;
+      const double hd = std::hypot(toAnchor.X(), toAnchor.Y());
+      for (int i = 0; i < n; ++i)
+      {
+        const double t = static_cast<double>(i) / (n - 1);
+        Vector3d pt = this->tetherAnchor + (exitW - this->tetherAnchor) * t;
+        pt.Z(pt.Z() - 0.06 * hd * 4.0 * t * (1.0 - t));
+        const double floorZ = this->InPool(Vector3d(pt.X(), pt.Y(), 0.0)) ? this->waterMin.Z() + 0.01 : this->deckZ + 0.005;
+        pt.Z(std::max(pt.Z(), std::min(floorZ, exitW.Z())));
+        tetherPts.push_back(pt);
+      }
+    }
+    if (fibre) videoQuality = this->tetherBroken ? 0.0 : 1.0;
+    const bool linkOk = fibre ? !this->tetherBroken : rcMargin > 0.0;
+    if (linkOk != this->linkWasOk)
+    {
+      if (linkOk) gzmsg << "[AgastyaDynamics] " << linkMode << " link restored\n";
+      else gzwarn << "[AgastyaDynamics] " << linkMode << " link LOST - failsafe active\n";
+      this->linkWasOk = linkOk;
+    }
 
     // --- read pilot inputs -------------------------------------------------
     gz::msgs::Twist cmdMsg;
@@ -364,6 +507,30 @@ public:
       cmdYaw = 0.0;
     }
 
+    // Link failsafe: nothing from the operator gets through. Underwater the
+    // vehicle climbs until its antenna is clear of the surface; in air it
+    // holds position.
+    bool failsafeSurfacing = false;
+    if (!linkOk)
+    {
+      cmdLin = Vector3d::Zero;
+      cmdYaw = 0.0;
+      depthRequest = false;
+      depthCancel = false;
+      mode = this->activeMode;
+      if (this->flying && sub > 0.02 && antennaDepth > -0.05)
+      {
+        cmdLin.Z(this->failsafeAscent);
+        failsafeSurfacing = true;
+        this->depthHold = false;
+      }
+    }
+    else
+    {
+      this->activeMode = mode;
+    }
+    const bool climbing = cmdLin.Z() > 0.05;
+
     // controller domain: 0 = air profile, 1 = water profile
     double sigma = sub;
     if (mode == "air") sigma = 0.0;
@@ -371,7 +538,40 @@ public:
 
     const double maxH = Lerp(this->airMaxSpeed, this->waterMaxSpeed, sigma);
     const double maxUp = Lerp(this->airMaxClimb, this->waterMaxVertical, sigma);
-    const double maxDown = Lerp(this->airMaxDescent, this->waterMaxVertical, sigma);
+    double maxDown = Lerp(this->airMaxDescent, this->waterMaxVertical, sigma);
+    // Splashdown approach: limit the descent rate in the last 0.3 m above water.
+    const double hullBottom = pose.Pos().Z() + this->hullBottomZ;
+    bool splashdown = false;
+    if (this->InPool(p) && hullBottom > this->surfaceZ - 0.02 && hullBottom < this->surfaceZ + 0.3 && !climbing)
+    {
+      maxDown = std::min(maxDown, this->splashdownSpeed);
+      splashdown = true;
+    }
+    // Prop spin-down: once the hull is wet and the vehicle is not climbing,
+    // ramp each above-water propeller down to entry RPM before it touches the
+    // surface (a blade striking water at air RPM can break it).
+    const double D4 = std::pow(this->propD, 4);
+    const double entryThrust = this->propCt * this->rhoAir * std::pow(this->entryRpm / 60.0, 2) * D4;
+    // Triggered geometrically by the hull touching the water (earlier than any
+    // buoyancy threshold) and finished entryGuardFloor above the surface so the
+    // 40 ms motor lag has time to bring the RPM down before blade contact.
+    const bool hullWet = this->InPool(p) && hullBottom < this->surfaceZ;
+    bool entryGuard = false;
+    for (auto &r : this->rotors)
+    {
+      r.guardCap = 1e9;
+      // be at entry RPM ~80 ms (4 spin-down time constants) before the
+      // blades reach the surface at the current sink rate
+      const double sink = std::max(0.0, -v.Z());
+      const double floor = std::max(this->entryGuardFloor, 0.02 + sink * 4.0 * this->motorTauDown);
+      const double top = floor + std::max(0.03, this->entryGuardHeight - this->entryGuardFloor);
+      if (this->flying && hullWet && !climbing && r.waterFraction < 0.5 && r.propHeight < top)
+      {
+        const double t = Clamp((r.propHeight - floor) / (top - floor), 0.0, 1.0);
+        r.guardCap = Lerp(entryThrust, this->airMaxThrust, t);
+        entryGuard = true;
+      }
+    }
     {
       const double h = std::hypot(cmdLin.X(), cmdLin.Y());
       if (h > maxH) { cmdLin.X(cmdLin.X() * maxH / h); cmdLin.Y(cmdLin.Y() * maxH / h); }
@@ -515,19 +715,52 @@ public:
       this->ResetTargets(p, yaw);
     }
 
-    // --- motor lag + rotor wrench -------------------------------------------------
-    const double alphaLag = Clamp(dt / std::max(this->motorTau, dt), 0.0, 1.0);
+    // --- motor lag + rotor wrench + RPM / current / strike / cavitation ---------
+    // first-order motor response; spin-down is faster (ESC active braking)
+    const double alphaUp = Clamp(dt / std::max(this->motorTau, dt), 0.0, 1.0);
+    const double alphaDown = Clamp(dt / std::max(this->motorTauDown, dt), 0.0, 1.0);
     const Vector3d b3 = R * Vector3d::UnitZ;
+    const double D5 = D4 * this->propD;
+    const double kt = 60.0 / (2.0 * GZ_PI * this->motorKv);  // motor torque constant [N m/A]
+    double minCavSigma = std::numeric_limits<double>::infinity();
     for (auto &r : this->rotors)
     {
       const double fmax = Lerp(this->airMaxThrust, this->waterMaxThrust, r.waterFraction);
-      r.thrust += (r.cmd - r.thrust) * alphaLag;
+      r.thrust += (r.cmd - r.thrust) * (r.cmd > r.thrust ? alphaUp : alphaDown);
       r.thrust = Clamp(r.thrust, 0.0, fmax);
       const double k = Lerp(this->airTorqueCoeff, this->waterTorqueCoeff, r.waterFraction);
       const Vector3d f = b3 * r.thrust;
       thrustForce += f;
       thrustTorque += (R * (r.position - com)).Cross(f);
       thrustTorque += b3 * (-r.spin * k * r.thrust);
+
+      // T = Ct rho n^2 D^4,  Q = Cq rho n^2 D^5  (n in rev/s)
+      const double rho = Lerp(this->rhoAir, this->rhoWater, r.waterFraction);
+      const double nrev = std::sqrt(std::max(0.0, r.thrust) / (this->propCt * rho * D4));
+      r.rpm = nrev * 60.0;
+      const double torque = this->propCq * rho * nrev * nrev * D5;
+      r.current = r.thrust > 0.01 ? torque / kt + this->motorNoLoadCurrent : 0.0;
+      const bool wet = r.waterFraction > 0.05;
+      if (wet && !r.wet)
+      {
+        r.entryRpm = r.lastAirRpm;
+        if (r.lastAirRpm > this->propStrikeRpm)
+        {
+          ++this->propStrikes;
+          gzwarn << "[AgastyaDynamics] PROP STRIKE: propeller entered water at " << std::round(r.lastAirRpm)
+                 << " RPM (limit " << this->propStrikeRpm << ")\n";
+        }
+      }
+      r.wet = wet;
+      if (r.waterFraction < 0.01) r.lastAirRpm = r.rpm;
+      if (r.waterFraction > 0.5 && nrev > 0.01)
+      {
+        // cavitation number at the blade tip: (p_atm + rho g h - p_v) / (0.5 rho V_tip^2)
+        const double h = std::max(0.0, -r.propHeight);
+        const double vtip = GZ_PI * this->propD * nrev;
+        const double cav = (101325.0 + this->rhoWater * this->gravity * h - 2339.0) / (0.5 * this->rhoWater * vtip * vtip);
+        minCavSigma = std::min(minCavSigma, cav);
+      }
     }
 
     const Vector3d totalForce = thrustForce + forceEnv;
@@ -541,19 +774,47 @@ public:
       this->lastStatus = now;
       const char *domain = sub > 0.95 ? "UNDERWATER" : (sub > 0.02 ? "SURFACE" : "AIR");
       const double depth = this->InPool(p) ? std::max(0.0, this->surfaceZ - p.Z()) : 0.0;
-      char buf[512];
-      std::snprintf(buf, sizeof(buf),
-                    "{\"mode\":\"%s\",\"state\":\"%s\",\"domain\":\"%s\",\"submerged\":%.2f,"
-                    "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"depth\":%.2f,\"speed\":%.2f,"
-                    "\"depth_hold\":%s,\"depth_target\":%.2f,\"thrust\":[%.2f,%.2f,%.2f,%.2f],"
-                    "\"collective\":%.2f,\"weight\":%.2f,\"buoyancy\":%.2f,\"sim_time\":%.2f}",
-                    mode.c_str(), this->flying ? "FLYING" : "LANDED", domain, sub, p.X(), p.Y(), p.Z(),
-                    depth, v.Length(), this->depthHold ? "true" : "false",
-                    this->depthHold ? this->surfaceZ - this->target.Z() : 0.0, this->rotors[0].thrust,
-                    this->rotors[1].thrust, this->rotors[2].thrust, this->rotors[3].thrust, collective,
-                    weight, buoyancyWorld.Z(), now);
+      std::ostringstream s;
+      s << std::fixed << std::setprecision(2);
+      auto arr = [&s](const std::array<double, 4> &a, int prec) {
+        s << std::setprecision(prec) << '[' << a[0] << ',' << a[1] << ',' << a[2] << ',' << a[3] << ']'
+          << std::setprecision(2);
+      };
+      std::array<double, 4> thr{}, rpm{}, cur{}, ent{};
+      for (int i = 0; i < 4; ++i)
+      {
+        thr[i] = this->rotors[i].thrust;
+        rpm[i] = this->rotors[i].rpm;
+        cur[i] = this->rotors[i].current;
+        ent[i] = this->rotors[i].entryRpm;
+      }
+      s << "{\"mode\":\"" << mode << "\",\"state\":\"" << (this->flying ? "FLYING" : "LANDED")
+        << "\",\"domain\":\"" << domain << "\",\"submerged\":" << sub << ",\"x\":" << p.X()
+        << ",\"y\":" << p.Y() << ",\"z\":" << p.Z() << ",\"depth\":" << depth << ",\"speed\":" << v.Length()
+        << ",\"depth_hold\":" << (this->depthHold ? "true" : "false")
+        << ",\"depth_target\":" << (this->depthHold ? this->surfaceZ - this->target.Z() : 0.0) << ",\"thrust\":";
+      arr(thr, 2);
+      s << ",\"rpm\":";
+      arr(rpm, 0);
+      s << ",\"current\":";
+      arr(cur, 1);
+      s << ",\"entry_rpm\":";
+      arr(ent, 0);
+      s << ",\"prop_strikes\":" << this->propStrikes
+        << ",\"cav_sigma\":" << (std::isfinite(minCavSigma) ? std::min(minCavSigma, 9999.0) : -1.0)
+        << ",\"splashdown\":" << ((splashdown || entryGuard) ? "true" : "false")
+        << ",\"collective\":" << collective << ",\"weight\":" << weight << ",\"buoyancy\":" << buoyancyWorld.Z()
+        << ",\"link_mode\":\"" << linkMode << "\",\"link\":\"" << (linkOk ? "OK" : "LOST")
+        << "\",\"failsafe\":" << (failsafeSurfacing || !linkOk ? "true" : "false")
+        << ",\"rc_margin_db\":" << rcMargin << ",\"video_quality\":" << videoQuality
+        << ",\"antenna_depth\":" << antennaDepth << ",\"tether_broken\":" << (this->tetherBroken ? "true" : "false")
+        << ",\"tether_distance\":" << tetherDist << ",\"tether_length\":" << this->tetherLength
+        << ",\"tether_tension\":" << tetherTension << ",\"tether\":[";
+      for (size_t i = 0; i < tetherPts.size(); ++i)
+        s << (i ? "," : "") << '[' << tetherPts[i].X() << ',' << tetherPts[i].Y() << ',' << tetherPts[i].Z() << ']';
+      s << "],\"sim_time\":" << now << '}';
       gz::msgs::StringMsg msg;
-      msg.set_data(buf);
+      msg.set_data(s.str());
       this->statusPub.Publish(msg);
     }
   }
@@ -577,7 +838,9 @@ private:
     this->depthHold = false;
     this->integral = Vector3d::Zero;
     this->initialized = false;
-    for (auto &r : this->rotors) { r.thrust = 0.0; r.cmd = 0.0; }
+    this->tetherBroken = false;
+    this->propStrikes = 0;
+    for (auto &r : this->rotors) { r.thrust = 0.0; r.cmd = 0.0; r.wet = false; r.entryRpm = 0.0; }
   }
 
   // Thrust allocation with attitude priority over collective, yaw last.
@@ -594,7 +857,7 @@ private:
       A(1, i) = d.Y();
       A(2, i) = -d.X();
       A(3, i) = -r.spin * k;
-      fmax[i] = Lerp(this->airMaxThrust, this->waterMaxThrust, r.waterFraction);
+      fmax[i] = std::min(Lerp(this->airMaxThrust, this->waterMaxThrust, r.waterFraction), r.guardCap);
     }
     // Command all rotors against the weakest rotor's limit: when propellers
     // are in different media the stronger ones must not out-push the rest.
@@ -670,6 +933,26 @@ private:
     this->depthPending = true;
   }
 
+  // Simulation set-up option (not an operator radio command): which command
+  // link the vehicle uses. Selecting "fibre" again also re-attaches a broken
+  // tether.
+  void OnLinkMode(const gz::msgs::StringMsg &_msg)
+  {
+    std::string m = _msg.data();
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    m.erase(0, m.find_first_not_of(" \t\n"));
+    m.erase(m.find_last_not_of(" \t\n") + 1);
+    if (m != "fibre" && m != "fiber" && m != "radio")
+    {
+      gzwarn << "[AgastyaDynamics] unknown link mode [" << m << "] (fibre|radio)\n";
+      return;
+    }
+    std::lock_guard<std::mutex> lock(this->mutex);
+    this->linkMode = (m == "radio") ? "radio" : "fibre";
+    if (this->linkMode == "fibre") this->tetherResetPending = true;
+    gzmsg << "[AgastyaDynamics] link mode -> " << this->linkMode << "\n";
+  }
+
   // configuration
   gz::sim::Model model{gz::sim::kNullEntity};
   gz::sim::Entity linkEntity{gz::sim::kNullEntity};
@@ -678,15 +961,26 @@ private:
   double surfaceZ{0.0}, rhoWater{1000.0}, gravity{9.81};
   Vector3d waterMin, waterMax;
   double airMaxThrust{8.0}, waterMaxThrust{3.0}, airTorqueCoeff{0.016}, waterTorqueCoeff{0.03};
-  double motorTau{0.04}, rotorBand{0.04};
+  double motorTau{0.04}, motorTauDown{0.02}, rotorBand{0.04};
   std::vector<Rotor> rotors;
   std::vector<Cell> cells;
   double totalVolume{0.0};
   Vector3d airLin, airQuad, waterLin, waterQuad, airAng, waterAng, waterAngQuad;
   double airMaxSpeed{3.0}, airMaxClimb{1.5}, airMaxDescent{1.0}, waterMaxSpeed{0.4}, waterMaxVertical{0.3};
   double airMaxTilt{0.6}, waterMaxTilt{0.6}, surfaceMaxTilt{0.25}, maxYawRate{1.5}, cmdTimeout{0.6};
+  double rhoAir{1.225};
+  double propD{0.254}, propCt{0.11}, propCq{0.008}, motorKv{1000.0}, motorNoLoadCurrent{0.5};
+  double propStrikeRpm{1500.0}, entryRpm{1000.0}, entryGuardHeight{0.15}, entryGuardFloor{0.05};
+  double hullBottomZ{-0.106}, splashdownSpeed{0.4}, deckZ{0.10};
+  Vector3d radioAntenna, tetherAnchor, tetherExit;
+  double rcLinkMargin{30.0}, rcLossPerCm{2.5}, videoLinkMargin{30.0}, videoLossPerCm{14.0}, interfaceLoss{4.4};
+  double tetherLength{25.0}, tetherLambda{0.006}, tetherDiameter{0.002}, tetherBreakingLoad{400.0};
+  double tetherStiffness{3000.0}, failsafeAscent{0.25};
 
   // runtime state
+  bool tetherBroken{false}, tetherResetPending{false}, linkWasOk{true};
+  int propStrikes{0};
+  std::string activeMode{"auto"};
   bool initialized{false}, flying{false}, depthHold{false}, hWasActive{false}, vWasActive{false};
   double mass0{0.0}, lastSimTime{0.0}, lastStatus{-1.0}, landedTimer{0.0}, yawTarget{0.0};
   Vector3d target, integral;
@@ -698,6 +992,7 @@ private:
   gz::msgs::Twist twist;
   double twistWallStamp{-1e9};
   std::string mode{"auto"};
+  std::string linkMode{"fibre"};
   bool depthPending{false};
   double depthValue{0.0};
 };

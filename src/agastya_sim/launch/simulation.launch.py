@@ -52,7 +52,8 @@ def generate_launch_description():
     pad = LaunchConfiguration('pad')
     use_sim_time = {'use_sim_time': True}
 
-    robot_description = ParameterValue(Command(['xacro ', urdf]), value_type=str)
+    robot_description = ParameterValue(
+        Command(['xacro ', urdf, ' link_mode:=', LaunchConfiguration('link')]), value_type=str)
 
     gz_args = PythonExpression([
         "'-r -v 2 ", world, "' if '", gui, "' == 'true' else '-r -s -v 2 --headless-rendering ", world, "'"])
@@ -81,6 +82,7 @@ def generate_launch_description():
         parameters=[use_sim_time], condition=IfCondition(PythonExpression(["'", gui, "' == 'true' and '", rviz, "' == 'true'"])),
     )
     markers = Node(package='agastya_sim', executable='world_markers', output='log', parameters=[use_sim_time])
+    link_sim = Node(package='agastya_sim', executable='link_sim', output='log', parameters=[use_sim_time])
     control_pad = Node(
         package='agastya_sim', executable='control_pad', output='screen',
         condition=IfCondition(PythonExpression(["'", gui, "' == 'true' and '", pad, "' == 'true'"])),
@@ -94,6 +96,8 @@ def generate_launch_description():
         DeclareLaunchArgument('y', default_value='0.0'),
         DeclareLaunchArgument('z', default_value='0.25'),
         DeclareLaunchArgument('yaw', default_value='3.14159', description='Spawn heading (facing the pool)'),
+        DeclareLaunchArgument('link', default_value='fibre',
+                              description='Command link: fibre (tether, works underwater) | radio (lost underwater)'),
         DeclareLaunchArgument('gl', default_value='nvidia',
                               description='OpenGL under WSLg: nvidia | intel | software | system'),
         OpaqueFunction(function=select_gl),
@@ -104,6 +108,7 @@ def generate_launch_description():
         state_publisher,
         bridge,
         markers,
+        link_sim,
         TimerAction(period=4.0, actions=[spawn]),
         TimerAction(period=6.0, actions=[rviz_node, control_pad]),
     ])

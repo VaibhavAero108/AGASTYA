@@ -25,8 +25,9 @@
   ros_type_name: sensor_msgs/msg/Imu
   gz_type_name: gz.msgs.IMU
   direction: GZ_TO_ROS
-- ros_topic_name: /agastya/fpv/image
-  gz_topic_name: /agastya/fpv/image
+# raw camera; link_sim republishes it as /agastya/fpv/image (link-degraded)
+- ros_topic_name: /agastya/fpv/image_raw
+  gz_topic_name: /agastya/fpv/image_raw
   ros_type_name: sensor_msgs/msg/Image
   gz_type_name: gz.msgs.Image
   direction: GZ_TO_ROS
@@ -49,6 +50,11 @@
   direction: ROS_TO_GZ
 - ros_topic_name: /agastya/mode
   gz_topic_name: /agastya/mode
+  ros_type_name: std_msgs/msg/String
+  gz_type_name: gz.msgs.StringMsg
+  direction: ROS_TO_GZ
+- ros_topic_name: /agastya/link_mode
+  gz_topic_name: /agastya/link_mode
   ros_type_name: std_msgs/msg/String
   gz_type_name: gz.msgs.StringMsg
   direction: ROS_TO_GZ

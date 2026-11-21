@@ -155,6 +155,18 @@
       </link>
     </model>
 
+    <!-- ===================== fibre tether reel (pilot station) ===================== -->
+    <!-- anchor point must match <tether_anchor> in the URDF plugin block -->
+    <model name="tether_reel">
+      <static>true</static>
+      <pose>6.6 1.6 0.1 0 0 0</pose>
+      <link name="reel">
+        <visual name="stand"><pose>0 0 0.03 0 0 0</pose><geometry><box><size>0.30 0.20 0.06</size></box></geometry><material><ambient>0.2 0.2 0.22 1</ambient><diffuse>0.2 0.2 0.22 1</diffuse></material></visual>
+        <visual name="drum"><pose>0 0 0.16 1.5708 0 0</pose><geometry><cylinder><radius>0.10</radius><length>0.12</length></cylinder></geometry><material><ambient>1 0.8 0.1 1</ambient><diffuse>1 0.8 0.1 1</diffuse></material></visual>
+        <collision name="c"><pose>0 0 0.12 0 0 0</pose><geometry><box><size>0.30 0.20 0.24</size></box></geometry></collision>
+      </link>
+    </model>
+
     <!-- ===================== FPV landmarks ===================== -->
     <!-- underwater gate: 1.2 m wide, crossbar just below the surface, so the
          vehicle passes through it at the 0.2-0.6 m cruise depth -->

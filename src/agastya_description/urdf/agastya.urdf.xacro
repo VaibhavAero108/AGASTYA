@@ -34,6 +34,8 @@
     Landing gear .......... skid type, ~60 g (typical)
 -->
 <robot name="agastya" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- command link: "fibre" (tethered, works underwater) or "radio" (2.4/5.8 GHz, absorbed by water) -->
+  <xacro:arg name="link_mode" default="fibre"/>
   <xacro:property name="pkg" value="package://agastya_description/meshes"/>
   <xacro:property name="arm" value="0.159"/>          <!-- 450 mm / 2 / sqrt(2) -->
   <xacro:property name="arm_top" value="0.0283"/>     <!-- top face of the F450 arms -->
@@ -160,6 +162,23 @@
   <joint name="gps_m10_joint" type="fixed"><parent link="base_link"/><child link="gps_m10"/>
     <origin xyz="-0.035 0 ${enc_cz + enc_z/2 + 0.040 + 0.0072}"/></joint>
 
+  <!-- ===================== fibre-optic tether hardware ===================== -->
+  <!-- Ethernet <-> fibre media converter (mini SFP class, ~30 g) and a Raspberry
+       Pi Zero 2 W companion computer (65 x 30 x 5 mm, ~11 g) that streams the
+       camera and routes MAVLink to the Pixhawk; both inside the enclosure. -->
+  <xacro:part_box name="fibre_media_converter" parent="base_link" m="0.030" x="0.050" y="0.035" z="0.015"
+    px="0.040" py="0" pz="${arm_top + 0.0002 + 0.0075 + 0.001}" material="pcb_green"/>
+  <xacro:part_box name="companion_pi_zero_2w" parent="base_link" m="0.011" x="0.065" y="0.030" z="0.005"
+    px="0.025" py="0" pz="${arm_top + 0.052}" material="pcb_green"/>
+  <!-- tether strain-relief sleeve: fibre leaves the hull at the bottom centre,
+       below the battery, away from the propellers -->
+  <link name="tether_sleeve">
+    <xacro:cyl_inertia m="0.010" r="0.006" h="0.060"/>
+    <visual><geometry><cylinder radius="0.006" length="0.060"/></geometry><material name="battery_yellow"/></visual>
+  </link>
+  <joint name="tether_sleeve_joint" type="fixed"><parent link="base_link"/><child link="tether_sleeve"/>
+    <origin xyz="0 0 -0.074"/></joint>
+
   <!-- ===================== under-frame payload ===================== -->
   <xacro:part_box name="battery_3s_3300" parent="base_link" m="0.275" x="0.135" y="0.043" z="0.024"
     px="0" py="0" pz="-0.025" material="battery_yellow" collide="true"/>
@@ -187,7 +206,7 @@
       <always_on>1</always_on>
       <update_rate>30</update_rate>
       <visualize>false</visualize>
-      <topic>/agastya/fpv/image</topic>
+      <topic>/agastya/fpv/image_raw</topic>
       <gz_frame_id>fpv_camera_optical_frame</gz_frame_id>
       <camera>
         <camera_info_topic>/agastya/fpv/camera_info</camera_info_topic>
@@ -237,6 +256,7 @@
       <air_torque_coeff>0.016</air_torque_coeff>
       <water_torque_coeff>0.030</water_torque_coeff>
       <motor_time_constant>0.04</motor_time_constant>
+      <motor_time_constant_down>0.02</motor_time_constant_down>  <!-- ESC active braking -->
       <!-- displaced volumes: sealed enclosure + solid parts -->
       <buoyancy_box><size>${enc_x} ${enc_y} ${enc_z}</size><center>0 0 ${enc_cz}</center></buoyancy_box>
       <buoyancy_lumped><volume>0.00020</volume><center>0 0 0.005</center><height>0.05</height></buoyancy_lumped>
@@ -257,6 +277,39 @@
       <water_max_tilt>0.6</water_max_tilt>
       <max_yaw_rate>1.5</max_yaw_rate>
       <command_timeout>0.6</command_timeout>
+      <!-- propeller/motor model: T = Ct rho n^2 D^4, Q = Cq rho n^2 D^5 (static 1045
+           coefficients, textbook values); used for RPM, current, prop-strike and
+           cavitation estimates -->
+      <prop_diameter>0.254</prop_diameter>
+      <prop_ct>0.11</prop_ct>
+      <prop_cq>0.008</prop_cq>
+      <motor_kv>1000</motor_kv>
+      <motor_no_load_current>0.5</motor_no_load_current>
+      <!-- splashdown: slow approach, props spun down to entry_rpm before contact;
+           entering water above prop_strike_rpm counts as a prop strike (assumption) -->
+      <prop_strike_rpm>1500</prop_strike_rpm>
+      <entry_rpm>1000</entry_rpm>
+      <entry_guard_height>0.15</entry_guard_height>   <!-- props start spinning down here (hull wet) -->
+      <entry_guard_floor>0.05</entry_guard_floor>     <!-- ...and are at entry_rpm by here -->
+      <hull_bottom_z>-0.106</hull_bottom_z>
+      <splashdown_speed>0.4</splashdown_speed>
+      <deck_z>0.10</deck_z>
+      <!-- command link -->
+      <link_mode>$(arg link_mode)</link_mode>
+      <radio_antenna>-0.035 0 ${enc_cz + enc_z/2 + 0.052}</radio_antenna>
+      <rc_link_margin_db>30</rc_link_margin_db>
+      <rc_loss_db_per_cm>2.5</rc_loss_db_per_cm>        <!-- 2.4 GHz in fresh water -->
+      <video_link_margin_db>30</video_link_margin_db>
+      <video_loss_db_per_cm>14</video_loss_db_per_cm>   <!-- 5.8 GHz in fresh water -->
+      <air_water_interface_loss_db>4.4</air_water_interface_loss_db>
+      <!-- fibre-optic tether: 2 mm Kevlar-reinforced G.657 cable from a shore reel -->
+      <tether_anchor>6.6 1.6 0.12</tether_anchor>
+      <tether_exit>0 0 -0.11</tether_exit>
+      <tether_length>25</tether_length>
+      <tether_linear_density>0.006</tether_linear_density>
+      <tether_diameter>0.002</tether_diameter>
+      <tether_breaking_load>400</tether_breaking_load>
+      <failsafe_ascent_speed>0.25</failsafe_ascent_speed>
     </plugin>
   </gazebo>
 </robot>

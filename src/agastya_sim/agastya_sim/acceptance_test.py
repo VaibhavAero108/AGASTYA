@@ -32,6 +32,7 @@ class Mission(Node):
         self.cmd = self.create_publisher(Twist, '/agastya/cmd_vel', 10)
         self.mode = self.create_publisher(String, '/agastya/mode', 10)
         self.depth = self.create_publisher(Float64, '/agastya/depth/setpoint', 10)
+        self.link = self.create_publisher(String, '/agastya/link_mode', 10)
         self.status = None
         self.odom = None
         self.images = 0
@@ -132,6 +133,7 @@ class Mission(Node):
         if not self.run(60.0, until=lambda: True):
             self.check('startup', False, 'no status/odometry from simulation')
             return
+        self.link.publish(String(data='fibre'))
         self.mode.publish(String(data='auto'))
         self.run(1.0)
 
@@ -187,12 +189,17 @@ class Mission(Node):
 
         # 5. air -> water transition
         self.max_acc, self.track_acc = 0.0, True
-        ok = self.run(30.0, lambda: {'vz': -0.6}, until=lambda: self.status['domain'] == 'UNDERWATER')
+        # descend while still moving forward: the harder splashdown case
+        ok = self.run(30.0, lambda: {'vz': -0.6, 'vx': 0.3}, until=lambda: self.status['domain'] == 'UNDERWATER')
         self.run(2.0)
         self.track_acc = False
         self.check('5 air -> water transition', ok and self.max_acc < 30.0,
                    f'domain {self.status["domain"]}, depth {self.status["depth"]:.2f} m, '
                    f'peak IMU accel {self.max_acc:.1f} m/s^2')
+        entry = max(self.status.get('entry_rpm', [0]))
+        self.check('5b splashdown prop spin-down', self.status.get('prop_strikes', 0) == 0 and 0 < entry < 1500,
+                   f'propellers entered the water at <= {entry:.0f} RPM (strike limit 1500), '
+                   f'prop strikes {self.status.get("prop_strikes", 0)}')
 
         # 6. depth hold
         self.depth.publish(Float64(data=0.35))
@@ -206,19 +213,48 @@ class Mission(Node):
         # 7. underwater drive
         sx, sy, _ = self.pos()
         derr = [0.0]
-        self.run(8.0, lambda: {'vx': 0.4},
-                 monitor=lambda: derr.__setitem__(0, max(derr[0], abs(self.status['depth'] - 0.35))))
+        uw = {'link_ok': True, 'video': 1.0, 'cav': 1e9, 'rpm': 0.0, 'amps': 0.0}
+
+        def monitor_uw():
+            s = self.status
+            derr[0] = max(derr[0], abs(s['depth'] - 0.35))
+            uw['link_ok'] = uw['link_ok'] and s.get('link') == 'OK'
+            uw['video'] = min(uw['video'], s.get('video_quality', 1.0))
+            if s.get('cav_sigma', -1) > 0:
+                uw['cav'] = min(uw['cav'], s['cav_sigma'])
+            uw['rpm'] = max(uw['rpm'], max(s.get('rpm', [0])))
+            uw['amps'] = max(uw['amps'], max(s.get('current', [0])))
+        self.run(8.0, lambda: {'vx': 0.4}, monitor=monitor_uw)
         tx, ty, _ = self.pos()
         dist = math.hypot(tx - sx, ty - sy)
         self.run(3.0)
         self.check('7 underwater horizontal drive', dist > 0.6 and derr[0] < 0.2 and self.status['domain'] == 'UNDERWATER',
                    f'moved {dist:.2f} m in 8 s, max depth error {derr[0]:.3f} m')
+        self.check('7b fibre link underwater', uw['link_ok'] and uw['video'] >= 0.99,
+                   f'link stayed OK, video quality {uw["video"] * 100:.0f} %, '
+                   f'tether {self.status.get("tether_distance", 0):.1f}/{self.status.get("tether_length", 0):.0f} m')
+        self.check('7c no cavitation underwater', uw['cav'] > 1.0,
+                   f'min cavitation number {uw["cav"]:.0f} (>1 = none), max {uw["rpm"]:.0f} RPM, '
+                   f'max motor current {uw["amps"]:.1f} A')
+
+        # 7d. radio instead of fibre: the link is absorbed by water -> failsafe surfaces
+        self.link.publish(String(data='radio'))
+        lost = self.run(5.0, until=lambda: self.status.get('link') == 'LOST')
+        video_lost = self.status.get('video_quality', 1.0)
+        regained = self.run(30.0, until=lambda: self.status.get('link') == 'OK')
+        self.run(1.0)
+        self.check('7d radio link failsafe', lost and video_lost < 0.05 and regained,
+                   f'radio lost underwater (video {video_lost * 100:.0f} %), failsafe surfaced, link regained at '
+                   f'antenna depth {self.status.get("antenna_depth", 0):.2f} m')
+        self.link.publish(String(data='fibre'))
+        self.run(1.0)
 
         # 8. surface and take off from the water while still moving forward
         self.depth.publish(Float64(data=0.0))
         self.max_acc, self.track_acc = 0.0, True
         breach_tilt = [0.0]
-        ok = self.run(30.0, lambda: {'vz': 0.8, 'vx': 0.3},
+        # (moving backwards, away from the underwater gate's crossbar)
+        ok = self.run(30.0, lambda: {'vz': 0.8, 'vx': -0.3},
                       until=lambda: self.status['domain'] == 'AIR' and self.pos()[2] > 0.8,
                       monitor=lambda: breach_tilt.__setitem__(0, max(breach_tilt[0], self.tilt())))
         self.track_acc = False

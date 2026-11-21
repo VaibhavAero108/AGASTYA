@@ -31,6 +31,17 @@ Key files:
 - **`src/agastya_sim/launch/simulation.launch.py`:** the single launch file.
 - **`src/agastya_sim/agastya_sim/{control_pad,world_markers,acceptance_test}.py`:** the pad window, RViz markers and test mission.
 
+## Link, tether and propeller model (2026-11-22)
+
+- **Link mode:** launch arg `link:=fibre|radio` (passed to xacro), or the topic `/agastya/link_mode`. The plugin computes RC margin and video quality from the antenna depth, plus tether forces and the polyline. In radio mode the failsafe climbs until the antenna regains signal.
+- **`link_sim` node:** republishes `/agastya/fpv/image_raw` as `/agastya/fpv/image`, degraded by link quality. It also draws the tether in RViz (`/agastya/tether_marker`) and in the Gazebo GUI through the gz Python bindings (`/marker` service). The tether anchor in the URDF must match the `tether_reel` model in the world.
+- **Splashdown guard:**
+  - triggers when the hull bottom is wet and the vehicle is not climbing
+  - spin-down finishes 80 ms before blade contact at the current sink rate
+  - motor spin-down τ is 20 ms (`motor_time_constant_down`)
+  - the acceptance test checks entry RPM < 1,500 while descending *and moving*
+- **Running tests while a GUI session is open:** run the test in its own `GZ_PARTITION` and `ROS_DOMAIN_ID`, or the two simulations cross-talk.
+
 ## Gotchas learned
 
 - The STEP-derived F450 STL is not in the robot frame. See the visual origin in the URDF and `HARDWARE_ARCHITECTURE.md`.

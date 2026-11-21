@@ -1,6 +1,6 @@
 # AGASTYA project status
 
-Updated: 2026-11-21 (Claude Code takeover)
+Updated: 2026-11-22 (fibre tether, link model, propeller RPM, splashdown and cavitation added)
 
 ## Summary
 
@@ -11,7 +11,26 @@ The simulation is **operational out of the box**. A single launch starts the fol
 - RViz with the FPV image
 - the control pad
 
-## Verified (2026-11-21)
+## Verified (2026-11-22): fibre tether / link / propeller update
+
+Headless (`gui:=false`, isolated `GZ_PARTITION`) result: **15/15**.
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1–4 | Pad idle, FPV, take-off/hover, manual air control | pass (drift 0.000 m; 2.83 m forward in 2 s; 85° yaw) |
+| 5 | Air → water **while moving forward** | peak IMU 15.9 m/s² |
+| 5b | Splashdown prop spin-down | props entered at ≤ 1,065 RPM, **0 prop strikes** |
+| 6 | 0.35 m depth hold | error < 0.01 m |
+| 7 | Underwater drive | 1.56 m in 8 s |
+| 7b | Fibre link underwater | link OK, video 100 %, tether 7.6/25 m |
+| 7c | Cavitation | min σ = 144 (onset below 1); 89 RPM, 2.5 A maximum |
+| 7d | Radio link underwater | lost (video 0 %), failsafe surfaced, regained at antenna depth 0.07 m |
+| 8 | Water → air breach while moving | tilt 9.6° |
+| 9–10 | Land on pad; `off` | (5.50, 0.00) LANDED; 0.000 N |
+
+Regression case: flying to the pool and diving immediately used to give **2 prop strikes at 2,405 RPM**. After the speed-aware spin-down and the active-braking model, the props enter at 642–1,079 RPM with 0 strikes. The FPV frames were checked: clean over fibre at 0.41 m depth, snow in radio mode.
+
+## Verified (2026-11-21): initial takeover
 
 `ros2 run agastya_sim acceptance_test` results:
 
@@ -46,6 +65,8 @@ Further checks:
 6. **One launch file.** It starts Gazebo, the bridge (including `/tf`, camera_info and status), RViz, the control pad and the world markers.
 7. **Lite visual meshes.** The originals are kept.
 8. **Automated acceptance mission** added.
+9. **(2026-11-22) Fibre tether and link model.** Radio (absorbed by water, with failsafe surfacing) and fibre (tether weight, drag and breaking load) links; FPV degradation through `link_sim`; the tether drawn in Gazebo and RViz; the shore reel; the media converter and Pi Zero 2 W in the URDF.
+10. **(2026-11-22) Propeller physics.** RPM and current estimates, prop-strike detection, the automatic splashdown (slow approach, speed-aware spin-down, faster spin-down for ESC braking), and the cavitation number. The control pad shows the link, RPM, current, strikes and cavitation; `L` switches the link.
 
 The pre-takeover sources are backed up at `~/agastya_backups/agastya_src_pre_takeover_*.tgz`.
 
@@ -55,7 +76,10 @@ The pre-takeover sources are backed up at `~/agastya_backups/agastya_src_pre_tak
 - There is no added mass, wave, splash or current model. Water is a static volume, x −4…4, y −3…3, z −1.2…0, which must match the plugin parameters in the URDF.
 - Underwater horizontal speed is low (about 0.2 m/s). Propulsion comes only from tilting the four rotors, and the vehicle is slightly negatively buoyant.
 - Underwater, the FPV image is a clear-water rendering, with no turbidity or colour absorption.
-- With motors `off` in water, the vehicle sinks slowly by design (net −1.26 N).
+- With motors `off` in water, the vehicle sinks slowly by design (net −1.76 N with the tether hardware).
+- The propeller coefficients (C<sub>t</sub>, C<sub>q</sub>) are static textbook values, and the 1,500 RPM prop-strike threshold is an assumption. There is no ventilation model (air drawn down near the surface).
+- The tether is a force model plus a drawn line. It is not a simulated flexible cable, so it can't snag on the gate or wrap on the props. The radio absorption figures are fresh-water estimates.
+- The splashdown guard is automatic: hovering low over the water with the hull wet and not climbing lets the vehicle settle in. To lift off from the water, hold `R`.
 - Surfacing directly under an obstacle (for example the gate crossbar) blocks the vehicle, as it would in reality.
 
 ## Next steps

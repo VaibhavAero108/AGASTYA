@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'control_pad = agastya_sim.control_pad:main',
             'world_markers = agastya_sim.world_markers:main',
+            'link_sim = agastya_sim.link_sim:main',
             'acceptance_test = agastya_sim.acceptance_test:main',
         ],
     },

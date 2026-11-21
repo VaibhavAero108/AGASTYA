@@ -70,6 +70,7 @@ Click the **AGASTYA control pad** window so it has keyboard focus, then hold key
 | `SPACE` | stop: hold the current position |
 | `H` | dive to and hold 0.35 m depth (also works from the air) |
 | `C` | cancel depth hold |
+| `L` | switch the command link: fibre tether ↔ radio |
 | `1` `2` `3` `0` | mode: auto / air / underwater / off |
 
 When you release a key, the vehicle holds its position, altitude or depth. The sliders set the requested speed; the vehicle limits it to its air or water envelope.
@@ -88,6 +89,26 @@ When you release a key, the vehicle holds its position, altitude or depth. The s
 - **air** / **underwater**: force one control profile. The physics stays the same either way.
 - **off**: all four motors stop immediately. In water the vehicle slowly sinks, because it is slightly heavier than the water it displaces.
 
+### Command link: fibre tether or radio
+
+Radio waves are absorbed by water: about 2.5 dB per cm at 2.4 GHz (control) and about 14 dB per cm at 5.8 GHz (video) in fresh water. A radio-controlled drone therefore loses control and video within centimetres of the surface. AGASTYA models both options:
+
+| Link | Underwater behaviour | Hardware |
+| --- | --- | --- |
+| **fibre** (default) | the link and FPV stay perfect at any depth; the yellow tether to the shore reel is drawn in Gazebo and RViz; the tether adds weight and drag and breaks if pulled past its 25 m length | 2 mm Kevlar G.657 fibre, Ethernet⇄fibre media converter, Raspberry Pi Zero 2 W (video + MAVLink) |
+| **radio** | control is lost about 10 cm below the surface and the FPV turns to snow; the **failsafe** cancels depth hold and climbs until the antenna regains signal, then holds | RC receiver + 5.8 GHz video transmitter |
+
+Press `L` on the pad, launch with `link:=radio`, or run `ros2 topic pub --once /agastya/link_mode std_msgs/msg/String "{data: radio}"`.
+
+### Propellers and water entry
+
+Water is about 800 times denser than air, so the props turn **about 5,000 RPM in hover in air but only about 60–250 RPM in water**. A blade that hits the water at air RPM (tip speed about 67 m/s) can snap, and the stalled motor can draw dangerous current. The vehicle therefore performs an automatic **splashdown**:
+- It descends at no more than 0.4 m/s over the last 0.3 m.
+- Once the hull touches the water, it spins the props down to about 1,000 RPM, timed so they reach it about 80 ms before the blades touch.
+- A blade entering the water above 1,500 RPM is logged as a **prop strike**.
+
+The control pad shows the live RPM, motor current, the last entry RPM, the strike count and the **cavitation number**. Cavitation needs a value below about 1; underwater it is above 100, because the tip speed is only a few m/s.
+
 ### Other command sources
 
 - **Topics:** anything that publishes `geometry_msgs/Twist` on `/agastya/cmd_vel` can fly it. The values are body-frame m/s, with `angular.z` in rad/s.
@@ -97,7 +118,7 @@ When you release a key, the vehicle holds its position, altitude or depth. The s
   ros2 topic pub --once /agastya/depth/setpoint std_msgs/msg/Float64 "{data: 0.35}"   # 0 cancels
   ros2 topic echo /agastya/status    # JSON: mode, state, domain, depth, rotor thrusts, ...
   ```
-- **Launch options:** `rviz:=false`, `pad:=false`, `gui:=false` (headless server only), and the spawn pose `x:= y:= z:= yaw:=`.
+- **Launch options:** `link:=fibre|radio`, `rviz:=false`, `pad:=false`, `gui:=false` (headless server only), and the spawn pose `x:= y:= z:= yaw:=`.
 
 ## Troubleshooting (WSLg display)
 
@@ -113,20 +134,24 @@ With the simulation running (GUI or `gui:=false`):
 ros2 run agastya_sim acceptance_test
 ```
 
-The test flies the full mission and checks 11 criteria:
+The test flies the full mission and checks 15 criteria:
 - idle on the pad for 10 s
 - FPV image stream
 - take-off and hover
 - manual air response
 - flight to the pool
-- air → water transition
+- air → water transition while moving forward
+- **splashdown prop spin-down** (no prop strike)
 - 0.35 m depth hold
 - underwater drive
+- **fibre link and video intact underwater**
+- **no cavitation**
+- **radio-link loss and failsafe surfacing**
 - water → air breach while moving
 - landing on the pad
 - the `off` stop command
 
-The latest result is 11/11, both headless and in the GUI session; see `PROJECT_STATUS.md`.
+The latest result is 15/15; see `PROJECT_STATUS.md`.
 
 ## Topics
 
@@ -135,8 +160,11 @@ The latest result is 11/11, both headless and in the GUI session; see `PROJECT_S
 | `/agastya/cmd_vel` | geometry_msgs/Twist | → vehicle |
 | `/agastya/mode` | std_msgs/String (`auto`, `air`, `underwater`, `off`) | → vehicle |
 | `/agastya/depth/setpoint` | std_msgs/Float64 (m below surface; 0 cancels) | → vehicle |
-| `/agastya/status` | std_msgs/String (JSON) | ← vehicle |
-| `/agastya/fpv/image`, `/agastya/fpv/camera_info` | sensor_msgs | ← 640×480, 30 Hz, 90° HFOV |
+| `/agastya/link_mode` | std_msgs/String (`fibre`, `radio`) | → vehicle (simulation set-up) |
+| `/agastya/status` | std_msgs/String (JSON: state, link, RPM, current, entry RPM, prop strikes, cavitation number, tether, …) | ← vehicle |
+| `/agastya/fpv/image` | sensor_msgs/Image | ← operator FPV, degraded by the link model |
+| `/agastya/fpv/image_raw`, `/agastya/fpv/camera_info` | sensor_msgs | ← raw camera: 640×480, 30 Hz, 90° HFOV |
+| `/agastya/tether_marker` | visualization_msgs/Marker | ← fibre tether line for RViz |
 | `/agastya/imu` | sensor_msgs/Imu | ← 100 Hz (Pixhawk location) |
 | `/agastya/odometry` | nav_msgs/Odometry | ← 50 Hz, frame `world` |
 | `/tf`, `/tf_static`, `/robot_description` | | ← `world → base_link →` parts |
@@ -145,7 +173,7 @@ The latest result is 11/11, both headless and in the GUI session; see `PROJECT_S
 
 - `agastya_description`: the single URDF/Xacro used by **both** RViz and Gazebo, the CAD meshes, the world and the mesh tools.
 - `agastya_gz_plugins`: `AgastyaDynamics`, a Gazebo system plugin for rotor thrust, buoyancy, drag and flight/swim assist on simulation time.
-- `agastya_sim`: the launch file, bridge configuration, RViz layout, control pad, world markers and acceptance test.
+- `agastya_sim`: the launch file, bridge configuration, RViz layout, control pad, world markers, link and tether simulator (`link_sim`) and acceptance test.
 
 See `HARDWARE_ARCHITECTURE.md` for the parts list and model assumptions, and `PROJECT_STATUS.md` for verified results and limitations.
 
