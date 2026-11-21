@@ -124,6 +124,8 @@ The control pad shows the live RPM, motor current, the last entry RPM, the strik
 
 - **Window titles start with `[WARN:COPY MODE]` and Gazebo/RViz are black or frozen.** This is a WSL problem: WSLg could not open its shared memory with Windows. `/mnt/wslg/weston.log` shows `rdp_allocate_shared_memory: Failed to open ... Input/output error`. Close the simulation, run `wsl --shutdown` in Windows PowerShell, and start again. If it keeps happening, run `wsl --update`.
 - **GPU selection.** The launch file sets Mesa's D3D12 driver on the NVIDIA GPU (`gl:=nvidia`, the default). Without it, WSLg falls back to slow CPU rendering (llvmpipe). Other options are `gl:=intel`, `gl:=software` and `gl:=system`.
+- **Drone or tether visible in RViz but not in Gazebo.** This was fixed in commit `03e756d`: the Gazebo GUI now starts as a separate process after the vehicle has spawned, and the tether marker uses the correct `/marker` reply type. `git pull`, then relaunch.
+- **Only one simulation at a time.** Run `agastya_stop` before launching again. For automated tests next to an open session, set a different `GZ_PARTITION` and `ROS_DOMAIN_ID`.
 - **Window placement.** The control pad must have keyboard focus to fly. In RViz, scroll to zoom the follow camera. In Gazebo, right-click the vehicle and choose *Follow*.
 
 ## Automated acceptance test
