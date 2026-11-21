@@ -1,0 +1,262 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2026 Vaibhav (VaibhavAero108) -->
+<!--
+  AGASTYA amphibious quadrotor - single source of truth.
+
+  This file is rendered by RViz (robot_state_publisher) AND spawned into
+  Gazebo, so the two views are identical. Fixed joints are lumped by sdformat
+  into one rigid body whose mass / centre of gravity / inertia come from the
+  per-part values below.
+
+  Geometry sources
+    * F450 frame : user STEP assembly -> FreeCAD export (f450_frame.stl) ->
+                   f450_frame_runtime.stl -> f450_frame_lite.stl (19k tris,
+                   tools/cluster_simplify.py). The mesh lies in the STEP X-Z
+                   plane, +Y up, origin offset; the visual origin below
+                   re-centres it and rotates +Y to +Z.
+    * A2212 motor: user supplied STL -> a2212_motor_lite.stl (axis +Z, base at
+                   z=5.2 mm, shaft centre x=14.5 y=4.0 mm).
+    * All other parts are primitive shapes at published nominal dimensions.
+
+  Part data (nominal / datasheet, not measurements of a built vehicle)
+    F450 frame ............ 282 g, 450 mm wheelbase (DJI manual)
+    A2212 1000KV x4 ....... 47 g each (vendor listing), 1045 prop
+    1045 propeller x4 ..... 10 x 4.5 in, ~10 g each (typical)
+    30A ESC x4 ............ 45 x 24 x 9 mm, ~25 g each (typical, BLHeli_32 class)
+    Pixhawk 6C Mini A ..... 54.3 x 39 x 17.5 mm, 42.4 g (Holybro)
+    Holybro PM07 .......... 68 x 50 x 8 mm, 36 g (PX4 docs)
+    Holybro M10 GPS ....... 50 mm dia x 14.4 mm, 32 g (Holybro/retail)
+    FPV camera ............ 19 mm micro class, ~8 g (generic)
+    3S 3300 mAh LiPo ...... 135 x 43 x 24 mm, ~275 g (typical)
+    Sealed enclosure ...... 140 x 100 x 70 mm clear acrylic box, ~160 g (design assumption)
+    Trim ballast .......... 100 x 50 x 7 mm lead plate, ~400 g (design assumption)
+    Landing gear .......... skid type, ~60 g (typical)
+-->
+<robot name="agastya" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:property name="pkg" value="package://agastya_description/meshes"/>
+  <xacro:property name="arm" value="0.159"/>          <!-- 450 mm / 2 / sqrt(2) -->
+  <xacro:property name="arm_top" value="0.0283"/>     <!-- top face of the F450 arms -->
+  <xacro:property name="prop_lift" value="0.032"/>    <!-- motor base -> propeller hub -->
+  <xacro:property name="prop_z" value="${arm_top + prop_lift}"/>
+  <xacro:property name="enc_x" value="0.14"/>
+  <xacro:property name="enc_y" value="0.10"/>
+  <xacro:property name="enc_z" value="0.07"/>
+  <xacro:property name="enc_cz" value="${arm_top + 0.0002 + enc_z / 2}"/>
+
+  <!-- ===================== materials ===================== -->
+  <material name="frame_white"><color rgba="0.92 0.92 0.90 1"/></material>
+  <material name="motor_black"><color rgba="0.10 0.10 0.11 1"/></material>
+  <material name="prop_orange"><color rgba="0.95 0.45 0.05 1"/></material>
+  <material name="prop_black"><color rgba="0.05 0.05 0.05 1"/></material>
+  <material name="esc_blue"><color rgba="0.10 0.25 0.75 1"/></material>
+  <material name="pcb_black"><color rgba="0.06 0.07 0.08 1"/></material>
+  <material name="pcb_green"><color rgba="0.05 0.40 0.15 1"/></material>
+  <material name="gps_grey"><color rgba="0.25 0.25 0.28 1"/></material>
+  <material name="battery_yellow"><color rgba="0.95 0.75 0.10 1"/></material>
+  <material name="lead_grey"><color rgba="0.40 0.42 0.45 1"/></material>
+  <material name="acrylic"><color rgba="0.75 0.88 1.00 0.30"/></material>
+  <material name="gear_black"><color rgba="0.12 0.12 0.12 1"/></material>
+
+  <!-- ===================== helpers ===================== -->
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertial><mass value="${m}"/>
+      <inertia ixx="${m*(y*y+z*z)/12}" iyy="${m*(x*x+z*z)/12}" izz="${m*(x*x+y*y)/12}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+  <xacro:macro name="cyl_inertia" params="m r h">
+    <inertial><mass value="${m}"/>
+      <inertia ixx="${m*(3*r*r+h*h)/12}" iyy="${m*(3*r*r+h*h)/12}" izz="${m*r*r/2}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+  <xacro:macro name="part_box" params="name parent m x y z px py pz yaw:=0 material collide:=false">
+    <link name="${name}">
+      <xacro:box_inertia m="${m}" x="${x}" y="${y}" z="${z}"/>
+      <visual><geometry><box size="${x} ${y} ${z}"/></geometry><material name="${material}"/></visual>
+      <xacro:if value="${collide}"><collision><geometry><box size="${x} ${y} ${z}"/></geometry></collision></xacro:if>
+    </link>
+    <joint name="${name}_joint" type="fixed"><parent link="${parent}"/><child link="${name}"/>
+      <origin xyz="${px} ${py} ${pz}" rpy="0 0 ${yaw}"/></joint>
+  </xacro:macro>
+  <xacro:macro name="leg" params="x y">
+    <visual><origin xyz="${x} ${y} 0.046"/><geometry><cylinder radius="0.004" length="0.092"/></geometry><material name="gear_black"/></visual>
+  </xacro:macro>
+
+  <!-- ===================== F450 frame (root) ===================== -->
+  <link name="base_link">
+    <inertial><mass value="0.282"/>
+      <inertia ixx="0.00282" iyy="0.00282" izz="0.00564" ixy="0" ixz="0" iyz="0"/></inertial>
+    <visual name="f450_frame">
+      <origin xyz="-0.080449 -0.256228 -0.140425" rpy="${pi/2} 0 0"/>
+      <geometry><mesh filename="${pkg}/f450_frame_lite.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="frame_white"/>
+    </visual>
+    <!-- central plate stack (contact proxy) -->
+    <collision name="frame_core"><origin xyz="0 0 0.008"/><geometry><box size="0.11 0.11 0.04"/></geometry></collision>
+  </link>
+
+  <!-- ===================== propulsion ===================== -->
+  <!-- spin: +1 = CCW seen from above (PX4 quad-X: front-right and rear-left CCW) -->
+  <xacro:macro name="rotor" params="name x y spin">
+    <link name="motor_${name}">
+      <xacro:cyl_inertia m="0.047" r="0.014" h="0.030"/>
+      <visual><origin xyz="-0.0145 -0.0040 -0.0052"/>
+        <geometry><mesh filename="${pkg}/a2212_motor_lite.stl" scale="0.001 0.001 0.001"/></geometry>
+        <material name="motor_black"/></visual>
+    </link>
+    <joint name="motor_${name}_joint" type="fixed"><parent link="base_link"/><child link="motor_${name}"/>
+      <origin xyz="${x} ${y} ${arm_top}"/></joint>
+
+    <link name="prop_${name}">
+      <xacro:box_inertia m="0.010" x="0.254" y="0.020" z="0.003"/>
+      <visual><origin rpy="0 0 ${0.6*float(spin)}"/><geometry><box size="0.254 0.020 0.003"/></geometry>
+        <material name="${'prop_orange' if float(spin) > 0 else 'prop_black'}"/></visual>
+      <visual><origin xyz="0 0 0.004"/><geometry><cylinder radius="0.007" length="0.010"/></geometry>
+        <material name="motor_black"/></visual>
+    </link>
+    <joint name="prop_${name}_joint" type="fixed"><parent link="motor_${name}"/><child link="prop_${name}"/>
+      <origin xyz="0 0 ${prop_lift}"/></joint>
+
+    <!-- potted 30A ESC on the arm, aligned with it -->
+    <xacro:part_box name="esc_${name}" parent="base_link" m="0.025" x="0.045" y="0.024" z="0.009"
+      px="${float(x)*0.51}" py="${float(y)*0.51}" pz="${arm_top + 0.0045}" yaw="${atan2(float(y), float(x))}" material="esc_blue"/>
+  </xacro:macro>
+  <xacro:rotor name="front_right" x="${arm}" y="${-arm}" spin="1"/>
+  <xacro:rotor name="rear_left" x="${-arm}" y="${arm}" spin="1"/>
+  <xacro:rotor name="front_left" x="${arm}" y="${arm}" spin="-1"/>
+  <xacro:rotor name="rear_right" x="${-arm}" y="${-arm}" spin="-1"/>
+
+  <!-- ===================== sealed electronics enclosure ===================== -->
+  <link name="enclosure">
+    <xacro:box_inertia m="0.160" x="${enc_x}" y="${enc_y}" z="${enc_z}"/>
+    <visual><geometry><box size="${enc_x} ${enc_y} ${enc_z}"/></geometry><material name="acrylic"/></visual>
+    <collision><geometry><box size="${enc_x} ${enc_y} ${enc_z}"/></geometry></collision>
+  </link>
+  <joint name="enclosure_joint" type="fixed"><parent link="base_link"/><child link="enclosure"/>
+    <origin xyz="0 0 ${enc_cz}"/></joint>
+
+  <!-- Holybro PM07 power module on the enclosure floor -->
+  <xacro:part_box name="pm07" parent="base_link" m="0.036" x="0.068" y="0.050" z="0.008"
+    px="-0.010" py="0" pz="${arm_top + 0.0042 + 0.004}" material="pcb_green"/>
+  <!-- Holybro Pixhawk 6C Mini (Model A current) on standoffs above the PM07 -->
+  <xacro:part_box name="pixhawk_6c_mini_link" parent="base_link" m="0.0424" x="0.0543" y="0.039" z="0.0175"
+    px="-0.015" py="0" pz="${arm_top + 0.020 + 0.00875}" material="pcb_black"/>
+
+  <!-- FPV camera through a sealed bulkhead in the enclosure front wall -->
+  <xacro:part_box name="fpv_camera_link" parent="base_link" m="0.008" x="0.019" y="0.019" z="0.019"
+    px="${enc_x/2 + 0.0095}" py="0" pz="${enc_cz + 0.010}" material="pcb_black"/>
+  <link name="fpv_camera_optical_frame">
+    <inertial><mass value="0.00001"/><inertia ixx="1e-9" iyy="1e-9" izz="1e-9" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <joint name="fpv_camera_optical_joint" type="fixed"><parent link="fpv_camera_link"/><child link="fpv_camera_optical_frame"/>
+    <origin xyz="0.0095 0 0" rpy="${-pi/2} 0 ${-pi/2}"/></joint>
+
+  <!-- Holybro M10 GPS on a short mast on the enclosure lid -->
+  <link name="gps_m10">
+    <xacro:cyl_inertia m="0.032" r="0.025" h="0.0144"/>
+    <visual><geometry><cylinder radius="0.025" length="0.0144"/></geometry><material name="gps_grey"/></visual>
+    <visual><origin xyz="0 0 -0.027"/><geometry><cylinder radius="0.004" length="0.040"/></geometry><material name="gear_black"/></visual>
+  </link>
+  <joint name="gps_m10_joint" type="fixed"><parent link="base_link"/><child link="gps_m10"/>
+    <origin xyz="-0.035 0 ${enc_cz + enc_z/2 + 0.040 + 0.0072}"/></joint>
+
+  <!-- ===================== under-frame payload ===================== -->
+  <xacro:part_box name="battery_3s_3300" parent="base_link" m="0.275" x="0.135" y="0.043" z="0.024"
+    px="0" py="0" pz="-0.025" material="battery_yellow" collide="true"/>
+  <xacro:part_box name="trim_ballast" parent="base_link" m="0.400" x="0.100" y="0.050" z="0.007"
+    px="0" py="0" pz="-0.0405" material="lead_grey"/>
+
+  <!-- skid landing gear -->
+  <link name="landing_gear">
+    <inertial><mass value="0.060"/><inertia ixx="0.0002" iyy="0.0001" izz="0.0002" ixy="0" ixz="0" iyz="0"/></inertial>
+    <xacro:leg x="0.06" y="0.10"/><xacro:leg x="-0.06" y="0.10"/>
+    <xacro:leg x="0.06" y="-0.10"/><xacro:leg x="-0.06" y="-0.10"/>
+    <visual><origin xyz="0 0.10 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.006" length="0.24"/></geometry><material name="gear_black"/></visual>
+    <visual><origin xyz="0 -0.10 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.006" length="0.24"/></geometry><material name="gear_black"/></visual>
+    <visual><origin xyz="0 0 0.088"/><geometry><box size="0.012 0.20 0.006"/></geometry><material name="gear_black"/></visual>
+    <collision><origin xyz="0 0.10 0"/><geometry><box size="0.24 0.012 0.012"/></geometry></collision>
+    <collision><origin xyz="0 -0.10 0"/><geometry><box size="0.24 0.012 0.012"/></geometry></collision>
+  </link>
+  <joint name="landing_gear_joint" type="fixed"><parent link="base_link"/><child link="landing_gear"/>
+    <origin xyz="0 0 -0.100"/></joint>
+
+  <!-- ===================== Gazebo ===================== -->
+  <gazebo reference="fpv_camera_link">
+    <sensor name="fpv_camera" type="camera">
+      <pose>0.010 0 0 0 0 0</pose>
+      <always_on>1</always_on>
+      <update_rate>30</update_rate>
+      <visualize>false</visualize>
+      <topic>/agastya/fpv/image</topic>
+      <gz_frame_id>fpv_camera_optical_frame</gz_frame_id>
+      <camera>
+        <camera_info_topic>/agastya/fpv/camera_info</camera_info_topic>
+        <horizontal_fov>1.5708</horizontal_fov>
+        <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+        <clip><near>0.02</near><far>150</far></clip>
+      </camera>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="pixhawk_6c_mini_link">
+    <sensor name="imu" type="imu">
+      <always_on>1</always_on>
+      <update_rate>100</update_rate>
+      <topic>/agastya/imu</topic>
+      <gz_frame_id>pixhawk_6c_mini_link</gz_frame_id>
+    </sensor>
+  </gazebo>
+
+  <gazebo>
+    <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>world</odom_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <odom_topic>/agastya/odometry</odom_topic>
+      <tf_topic>/agastya/tf</tf_topic>
+      <dimensions>3</dimensions>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+
+    <plugin filename="agastya_dynamics" name="agastya::AgastyaDynamics">
+      <link_name>base_link</link_name>
+      <namespace>/agastya</namespace>
+      <!-- pool water volume (must match the world) -->
+      <water_surface_z>0.0</water_surface_z>
+      <water_min>-4.0 -3.0 -1.2</water_min>
+      <water_max>4.0 3.0 0.0</water_max>
+      <water_density>1000</water_density>
+      <!-- rotors: propeller hub positions in base_link -->
+      <rotor><position>${arm} ${-arm} ${prop_z}</position><spin>1</spin></rotor>
+      <rotor><position>${-arm} ${arm} ${prop_z}</position><spin>1</spin></rotor>
+      <rotor><position>${arm} ${arm} ${prop_z}</position><spin>-1</spin></rotor>
+      <rotor><position>${-arm} ${-arm} ${prop_z}</position><spin>-1</spin></rotor>
+      <!-- A2212 1000KV + 1045 on 3S: vendor pull ~885 g; 8.0 N used (derated).
+           Water thrust is an untested assumption for a torque-limited air prop. -->
+      <air_max_thrust>8.0</air_max_thrust>
+      <water_max_thrust>3.0</water_max_thrust>
+      <air_torque_coeff>0.016</air_torque_coeff>
+      <water_torque_coeff>0.030</water_torque_coeff>
+      <motor_time_constant>0.04</motor_time_constant>
+      <!-- displaced volumes: sealed enclosure + solid parts -->
+      <buoyancy_box><size>${enc_x} ${enc_y} ${enc_z}</size><center>0 0 ${enc_cz}</center></buoyancy_box>
+      <buoyancy_lumped><volume>0.00020</volume><center>0 0 0.005</center><height>0.05</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.00014</volume><center>0 0 -0.025</center><height>0.024</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.000035</volume><center>0 0 -0.0405</center><height>0.007</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.00005</volume><center>0 0 -0.07</center><height>0.07</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.0000225</volume><center>${arm} ${arm} ${arm_top}</center><height>0.03</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.0000225</volume><center>${arm} ${-arm} ${arm_top}</center><height>0.03</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.0000225</volume><center>${-arm} ${arm} ${arm_top}</center><height>0.03</height></buoyancy_lumped>
+      <buoyancy_lumped><volume>0.0000225</volume><center>${-arm} ${-arm} ${arm_top}</center><height>0.03</height></buoyancy_lumped>
+      <!-- pilot envelope -->
+      <air_max_speed>3.0</air_max_speed>
+      <air_max_climb>1.5</air_max_climb>
+      <air_max_descent>1.0</air_max_descent>
+      <water_max_speed>0.4</water_max_speed>
+      <water_max_vertical>0.3</water_max_vertical>
+      <air_max_tilt>0.6</air_max_tilt>
+      <water_max_tilt>0.6</water_max_tilt>
+      <max_yaw_rate>1.5</max_yaw_rate>
+      <command_timeout>0.6</command_timeout>
+    </plugin>
+  </gazebo>
+</robot>

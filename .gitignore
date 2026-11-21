@@ -1,0 +1,21 @@
+# colcon / ROS 2 build products
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Full-resolution F450 export (~404 MB) exceeds GitHub's 100 MB file limit.
+# It is not used at runtime; regenerate it from the STEP file with
+# src/agastya_description/tools/export_cad_meshes.py (see README).
+src/agastya_description/meshes/f450_frame.stl

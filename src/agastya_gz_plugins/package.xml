@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>agastya_gz_plugins</name>
+  <version>0.3.0</version>
+  <description>Gazebo Sim system plugin for AGASTYA: rotor thrust, buoyancy, drag and manual air/underwater flight assist, all on simulation time.</description>
+  <maintainer email="vaibhav@todo.todo">Vaibhav (VaibhavAero108)</maintainer>
+  <license>GPL-3.0-or-later</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>gz_sim_vendor</depend>
+  <depend>gz_plugin_vendor</depend>
+  <depend>gz_transport_vendor</depend>
+  <depend>gz_msgs_vendor</depend>
+  <depend>gz_math_vendor</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
