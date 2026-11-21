@@ -9,10 +9,12 @@ import os
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (AppendEnvironmentVariable, DeclareLaunchArgument,
-                            IncludeLaunchDescription, OpaqueFunction, SetEnvironmentVariable,
-                            TimerAction)
+from launch.actions import (AppendEnvironmentVariable, DeclareLaunchArgument, EmitEvent,
+                            ExecuteProcess, IncludeLaunchDescription, OpaqueFunction,
+                            RegisterEventHandler, SetEnvironmentVariable, TimerAction)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -55,12 +57,23 @@ def generate_launch_description():
     robot_description = ParameterValue(
         Command(['xacro ', urdf, ' link_mode:=', LaunchConfiguration('link')]), value_type=str)
 
-    gz_args = PythonExpression([
-        "'-r -v 2 ", world, "' if '", gui, "' == 'true' else '-r -s -v 2 --headless-rendering ", world, "'"])
+    # Server and GUI run as separate processes. The GUI is started only after
+    # the vehicle has been spawned, so its initial scene request always
+    # contains AGASTYA (a combined process could miss the incremental
+    # "new entity" update during a slow cold start).
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('ros_gz_sim'), 'launch', 'gz_sim.launch.py')),
-        launch_arguments={'gz_args': gz_args, 'on_exit_shutdown': 'true'}.items(),
+        launch_arguments={'gz_args': '-r -s -v 2 --headless-rendering ' + world,
+                          'on_exit_shutdown': 'true'}.items(),
+    )
+    gazebo_gui = ExecuteProcess(
+        cmd=['gz', 'sim', '-g', '-v', '2'], output='log',
+        condition=IfCondition(gui),
+    )
+    close_all_with_gui = RegisterEventHandler(
+        OnProcessExit(target_action=gazebo_gui, on_exit=[EmitEvent(event=Shutdown(reason='Gazebo GUI closed'))]),
+        condition=IfCondition(gui),
     )
 
     state_publisher = Node(
@@ -110,5 +123,8 @@ def generate_launch_description():
         markers,
         link_sim,
         TimerAction(period=4.0, actions=[spawn]),
-        TimerAction(period=6.0, actions=[rviz_node, control_pad]),
+        close_all_with_gui,
+        # open the windows once the vehicle exists in the world
+        RegisterEventHandler(OnProcessExit(target_action=spawn,
+                                           on_exit=[gazebo_gui, rviz_node, control_pad])),
     ])

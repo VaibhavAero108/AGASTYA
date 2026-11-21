@@ -25,7 +25,7 @@ from std_msgs.msg import String
 from visualization_msgs.msg import Marker
 
 try:  # Gazebo transport Python bindings (shipped with the Jazzy gz vendor packages)
-    from gz.msgs10.boolean_pb2 import Boolean as GzBoolean
+    from gz.msgs10.empty_pb2 import Empty as GzEmpty  # /marker replies with gz.msgs.Empty
     from gz.msgs10.marker_pb2 import Marker as GzMarker
     from gz.transport13 import Node as GzNode
 except ImportError:  # pragma: no cover - visualisation is optional
@@ -135,7 +135,7 @@ class LinkSim(Node):
                     v = msg.point.add()
                     v.x, v.y, v.z = float(p[0]), float(p[1]), float(p[2])
             try:
-                ok, _ = node.request('/marker', msg, GzMarker, GzBoolean, 300)
+                ok, _ = node.request('/marker', msg, GzMarker, GzEmpty, 300)
             except Exception:  # noqa: BLE001 - GUI not running / API mismatch
                 ok = False
             if ok:
